@@ -187,6 +187,7 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
     private _isEdgeVisible: boolean = true;
     private _autoLayout: boolean = false;
     private _pendingAutoLayout: boolean = true;
+    private _pendingForceLayout: boolean = false;
     private _baseAutoLayoutId: number = 0x00000000;
     private _autoLayoutId: number = 0x00000000;
     private _holdTimer?: number;
@@ -270,6 +271,32 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
         this._processOnEndReached();
         this._checkAndChangeLayouts(this.props);
         this._virtualRenderer.setOptimizeForAnimations(false);
+
+        if (this._pendingForceLayout) {
+            setTimeout(() => {
+                this._pendingForceLayout = false;
+
+                const layoutManager = this._virtualRenderer.getLayoutManager();
+                const { _innerScrollComponent } = this;
+
+                if (layoutManager && _innerScrollComponent) {
+                    const preservedIndex = layoutManager.preservedIndex();
+                    const layouts = layoutManager.getLayouts();
+                    if (preservedIndex > -1) {
+                        let i = 0;
+                        for (const key in this.state.renderStack) {
+                            if (this.state.renderStack.hasOwnProperty(key)) {
+                                if (this.state.renderStack[key].dataIndex === preservedIndex) {
+                                    // @ts-ignore
+                                    _innerScrollComponent._children[i].setNativeProps({ style: { top: layouts[preservedIndex].y } });
+                                }
+                            }
+                            i++;
+                        }
+                    }
+                }
+            }, 0);
+        }
     }
 
     public componentDidMount(): void {
@@ -629,6 +656,7 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
                 layoutManager.relayoutFromIndex(newProps.dataProvider.getFirstIndexToProcessInternal(), newProps.dataProvider.getSize());
                 if (this._autoLayout) {
                     this._pendingAutoLayout = true;
+                    this._pendingForceLayout = true;
                 }
                 this._virtualRenderer.refresh();
                 this._queueLayoutRefix();
