@@ -823,7 +823,6 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
             }
             return (
                 <ViewRenderer key={key} data={data}
-                    isOverridden={!!itemRect.isOverridden}
                     dataHasChanged={this._dataHasChanged}
                     x={itemRect.x}
                     y={itemRect.y}
