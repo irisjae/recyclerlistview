@@ -276,7 +276,7 @@ export default class VirtualRenderer {
     }
 
     //Further optimize in later revision, pretty fast for now considering this is a low frequency event
-    public handleDataSetChange(newDataProvider: BaseDataProvider, scrollOffset: number): void {
+    public handleDataSetChange(newDataProvider: BaseDataProvider, scrollOffset: number, holdStableId: string | undefined): void {
         let preservePosition = false;
         let shiftStartEdge = false;
         let shiftLayouts = false;
@@ -286,11 +286,14 @@ export default class VirtualRenderer {
         if (this._preserveVisiblePosition && this._layoutManager) {
             const startEdgeThreshold = this._layoutManager.getLayouts()[0].y + this._edgeVisibleThreshold;
 
-            preservePosition = this._startEdgePreserved || scrollOffset > startEdgeThreshold;
-            shiftStartEdge = !this._startEdgePreserved && scrollOffset <= startEdgeThreshold;
+            preservePosition = holdStableId !== undefined || this._startEdgePreserved || scrollOffset > startEdgeThreshold;
+            shiftStartEdge = !preservePosition;
             shiftLayouts = this._shiftPreservedLayouts;
             if (shiftLayouts || preservePosition) {
                 preservedIndex = this._layoutManager.preservedIndex();
+                if (holdStableId !== undefined) {
+                    preservedStableId = holdStableId;
+                }
             }
         }
 
