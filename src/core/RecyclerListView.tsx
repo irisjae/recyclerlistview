@@ -188,6 +188,7 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
     private _pendingAutoLayout: boolean = true;
     private _baseAutoLayoutId: number = 0x00000000;
     private _autoLayoutId: number = 0x00000000;
+    private _pendingScroll?: () => void;
     private _holdTimer?: number;
     private _holdStableId?: string;
 
@@ -299,7 +300,8 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
         const layoutManager = this._virtualRenderer.getLayoutManager();
         if (layoutManager) {
             const offsets = layoutManager.getOffsetForIndex(index);
-            this.scrollToOffset(offsets.x, offsets.y, animate, this._windowCorrectionConfig.applyToItemScroll, index);
+            const getScrollCoords = () => layoutManager.getOffsetForIndex(index);
+            this.scrollToOffset(offsets.x, offsets.y, animate, this._windowCorrectionConfig.applyToItemScroll, index, getScrollCoords);
         } else {
             console.warn(Messages.WARN_SCROLL_TO_INDEX); //tslint:disable-line
         }
@@ -311,24 +313,35 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
      * and scroll to just bring the entire view to viewport.
      */
     public bringToFocus(index: number, animate?: boolean): void {
-        const listSize = this.getRenderedSize();
-        const itemLayout = this.getLayout(index);
-        const currentScrollOffset = this.getCurrentScrollOffset() + this._windowCorrectionConfig.value.windowShift;
-        const {isHorizontal} = this.props;
-        if (itemLayout) {
-            const mainAxisLayoutDimen = isHorizontal ? itemLayout.width : itemLayout.height;
-            const mainAxisLayoutPos = isHorizontal ? itemLayout.x : itemLayout.y;
-            const mainAxisListDimen = isHorizontal ? listSize.width : listSize.height;
-            const screenEndPos = mainAxisListDimen + currentScrollOffset;
-            if (mainAxisLayoutDimen > mainAxisListDimen || mainAxisLayoutPos < currentScrollOffset || mainAxisLayoutPos > screenEndPos) {
-                this.scrollToIndex(index);
-            } else {
-                const viewEndPos = mainAxisLayoutPos + mainAxisLayoutDimen;
-                if (viewEndPos > screenEndPos) {
-                    const offset = viewEndPos - screenEndPos;
-                    this.scrollToOffset(offset + currentScrollOffset, offset + currentScrollOffset, animate, true, index);
+        const getScrollCoords = () => {
+            const listSize = this.getRenderedSize();
+            const itemLayout = this.getLayout(index);
+            const currentScrollOffset = this.getCurrentScrollOffset() + this._windowCorrectionConfig.value.windowShift;
+            const {isHorizontal} = this.props;
+            if (itemLayout) {
+                let offset;
+                const mainAxisLayoutDimen = isHorizontal ? itemLayout.width : itemLayout.height;
+                const mainAxisLayoutPos = isHorizontal ? itemLayout.x : itemLayout.y;
+                const mainAxisListDimen = isHorizontal ? listSize.width : listSize.height;
+                const screenEndPos = mainAxisListDimen + currentScrollOffset;
+
+                if (mainAxisLayoutDimen > mainAxisListDimen || mainAxisLayoutPos < currentScrollOffset || mainAxisLayoutPos > screenEndPos) {
+                    offset = mainAxisLayoutPos;
+                } else {
+                    const viewEndPos = mainAxisLayoutPos + mainAxisLayoutDimen;
+                    if (viewEndPos > screenEndPos) {
+                        offset = viewEndPos - screenEndPos;
+                    }
+                }
+                if (offset !== undefined) {
+                    return { x: offset, y: offset };
                 }
             }
+            return;
+        };
+        const coords = getScrollCoords();
+        if (coords) {
+            this.scrollToOffset(coords.x, coords.y, animate, true, index, getScrollCoords);
         }
     }
 
@@ -358,7 +371,7 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
 
     // useWindowCorrection specifies if correction should be applied to these offsets in case you implement
     // `applyWindowCorrection` method
-    public scrollToOffset = (x: number, y: number, animate: boolean = false, useWindowCorrection: boolean = false, relativeIndex: number = -1): void => {
+    public scrollToOffset = (x: number, y: number, animate: boolean = false, useWindowCorrection: boolean = false, relativeIndex: number = -1, getScrollCoords?: () => { x: number, y: number } | undefined): void => {
         if (this._scrollComponent) {
             if (this.props.isHorizontal) {
                 y = 0;
@@ -372,48 +385,66 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
                 const preserveVisiblePosition = virtualRenderer.getPreserveVisiblePosition();
                 const layoutManager = virtualRenderer.getLayoutManager();
                 if (preserveVisiblePosition && layoutManager) {
-                    layoutManager.holdPreservedIndex(relativeIndex);
-                    this._holdStableId = this.props.dataProvider.getStableId(relativeIndex);
+                    const engagedIndexes = virtualRenderer.getViewabilityTracker()?.getEngagedIndexes()
+                    const firstEngagedIndex = engagedIndexes ? engagedIndexes[0] : -1
+                    const lastEngagedIndex = engagedIndexes ? engagedIndexes[engagedIndexes.length - 1] : -1
 
-                    if (this._autoLayout) {
-                        this._autoLayoutId = (this._autoLayoutId + 1) & 0x7FFFFFFF;
-                        if (this._autoLayoutId === this._baseAutoLayoutId) {
-                            this._baseAutoLayoutId = (this._baseAutoLayoutId ^ 0x40000000) & 0x7FFFFFFF;
+                    if (this._pendingAutoLayout && relativeIndex >= firstEngagedIndex && relativeIndex <= lastEngagedIndex) {
+                        this._pendingScroll = () => {
+                            if (getScrollCoords) {
+                                const coords = getScrollCoords();
+                                if (!coords) {
+                                    return;
+                                }
+                                x = coords.x;
+                                y = coords.y;
+                            }
+                            this.scrollToOffset(x, y, animate, useWindowCorrection, relativeIndex, getScrollCoords);
+                        };
+                    } else {
+                        layoutManager.holdPreservedIndex(relativeIndex);
+                        this._holdStableId = this.props.dataProvider.getStableId(relativeIndex);
+    
+                        if (this._autoLayout) {
+                            this._autoLayoutId = (this._autoLayoutId + 1) & 0x7FFFFFFF;
+                            if (this._autoLayoutId === this._baseAutoLayoutId) {
+                                this._baseAutoLayoutId = (this._baseAutoLayoutId ^ 0x40000000) & 0x7FFFFFFF;
+                            }
                         }
-                    }
-                    if (animate) {
-                        // the amount of time taken for the animation is variable
-                        // on ios, the animation is documented to be 'constant rate' at an unspecified rate, so the time is proportional to the length of scroll
-                        // on android, the only relevant information the author has discovered is that default animation duration is 250ms.
-                        // therefore, we hold until relativeIndex comes into view + a little time (especially for low-end devices) such that all scroll events have fired
-                        if (this._holdTimer !== undefined) {
-                            clearInterval(this._holdTimer);
-                        }
-                        this._holdTimer = setInterval(() => {
-                            if (Math.abs(this._scrollOffset - y) < 1) {
-                                const visibleIndexes = virtualRenderer.getViewabilityTracker()?.getVisibleIndexes();
-                                if (visibleIndexes) {
-                                    // Even though we have held the index, it may have been shifted by data changes
-                                    const preservedIndex = layoutManager.preservedIndex();
-                                    for (let i = 0; i < visibleIndexes.length; i++) {
-                                        if (visibleIndexes[i] === preservedIndex) {
-                                            clearInterval(this._holdTimer);
-                                            this._holdTimer = undefined;
-                                            setTimeout(() => {
-                                                layoutManager.unholdPreservedIndex();
-                                                this._holdStableId = undefined;
-                                            }, 150);
+                        if (animate) {
+                            // the amount of time taken for the animation is variable
+                            // on ios, the animation is documented to be 'constant rate' at an unspecified rate, so the time is proportional to the length of scroll
+                            // on android, the only relevant information the author has discovered is that default animation duration is 250ms.
+                            // therefore, we hold until relativeIndex comes into view + a little time (especially for low-end devices) such that all scroll events have fired
+                            if (this._holdTimer !== undefined) {
+                                clearInterval(this._holdTimer);
+                            }
+                            this._holdTimer = setInterval(() => {
+                                if (Math.abs(this._scrollOffset - y) < 1) {
+                                    const visibleIndexes = virtualRenderer.getViewabilityTracker()?.getVisibleIndexes();
+                                    if (visibleIndexes) {
+                                        // Even though we have held the index, it may have been shifted by data changes
+                                        const preservedIndex = layoutManager.preservedIndex();
+                                        for (let i = 0; i < visibleIndexes.length; i++) {
+                                            if (visibleIndexes[i] === preservedIndex) {
+                                                clearInterval(this._holdTimer);
+                                                this._holdTimer = undefined;
+                                                setTimeout(() => {
+                                                    layoutManager.unholdPreservedIndex();
+                                                    this._holdStableId = undefined;
+                                                }, 150);
+                                            }
                                         }
                                     }
                                 }
-                            }
-                        // We check every once in a while (three frames)
-                        }, 48);
-                    } else {
-                        setTimeout(() => {
-                            layoutManager.unholdPreservedIndex();
-                            this._holdStableId = undefined;
-                        }, 150);
+                            // We check every once in a while (three frames)
+                            }, 48);
+                        } else {
+                            setTimeout(() => {
+                                layoutManager.unholdPreservedIndex();
+                                this._holdStableId = undefined;
+                            }, 150);
+                        }
                     }
                 }
             }
@@ -995,6 +1026,15 @@ export default class RecyclerListView<P extends RecyclerListViewProps, S extends
         
             if (!offsetsStale) {
                 this._pendingAutoLayout = false;
+                if (this._pendingScroll) {
+                    setTimeout(() => {
+                        if (this._pendingScroll) {
+                            const executable = this._pendingScroll;
+                            this._pendingScroll = undefined;
+                            executable();
+                        }
+                    }, 0);
+                }
             }
     
             if (relayoutIndex > -1) {
